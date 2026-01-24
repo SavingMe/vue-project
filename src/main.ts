@@ -1,8 +1,10 @@
+// main.js
 import { createApp } from 'vue'
-import './style.css'
-// import App from './App.vue'
-//  import e1 from './views/E1.vue'
-//  import e2 from './views/E2.vue'
- import e3 from './views/E3.vue'
+import ElementPlus from 'element-plus'
+import 'element-plus/dist/index.css'
+import 'element-plus/theme-chalk/dark/css-vars.css' // 引入暗黑模式变量
+import App from './App.vue'
 
-createApp(e3).mount('#app')
+const app = createApp(App)
+app.use(ElementPlus)
+app.mount('#app')
