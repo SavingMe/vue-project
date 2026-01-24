@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>SAT-GUARD 态势感知主控台</title>
+    <style>
+        :root {
+            --bg-color: #0b0c10;
+            --panel-bg: #1f2833;
+            --text-color: #c5c6c7;
+            --accent-cyan: #66fcf1;
+            --accent-blue: #45a29e;
+            --alert-red: #ff2e63;
+            --border-color: #333;
+        }
+
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: 'Consolas', 'Monaco', monospace; /* 使用等宽字体增强科技感 */
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        /* --- Zone A: 顶部导航 --- */
+        .header {
+            height: 60px;
+            background-color: #111;
+            border-bottom: 2px solid var(--accent-blue);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 20px;
+            box-shadow: 0 0 10px rgba(102, 252, 241, 0.2);
+        }
+        .logo { font-size: 24px; font-weight: bold; color: var(--accent-cyan); letter-spacing: 2px; }
+        .system-status { display: flex; gap: 20px; font-size: 14px; }
+        .status-item { display: flex; align-items: center; gap: 8px; }
+        .dot { width: 10px; height: 10px; border-radius: 50%; background-color: #0f0; box-shadow: 0 0 5px #0f0; }
+
+        /* --- 主体布局 --- */
+        .main-container {
+            flex: 1;
+            display: flex;
+            height: calc(100vh - 100px); /* 减去头尾高度 */
+        }
+
+        /* --- Zone B: 地图区域 --- */
+        .map-view {
+            flex: 65; /* 占比 65% */
+            background: radial-gradient(circle at center, #1a222e 0%, #0b0c10 100%);
+            border-right: 1px solid var(--border-color);
+            position: relative;
+            overflow: hidden;
+        }
+        /* 模拟地图网格 */
+        .grid-lines {
+            position: absolute; width: 100%; height: 100%;
+            background-image: linear-gradient(#333 1px, transparent 1px), linear-gradient(90deg, #333 1px, transparent 1px);
+            background-size: 50px 50px;
+            opacity: 0.3;
+        }
+        
+        /* 模拟元素：卫星 */
+        .satellite {
+            position: absolute; width: 12px; height: 12px; background: var(--accent-cyan);
+            border-radius: 50%; top: 30%; left: 40%;
+            box-shadow: 0 0 15px var(--accent-cyan);
+            animation: orbit 10s infinite linear;
+        }
+        .satellite-label { position: absolute; top: -20px; color: var(--accent-cyan); font-size: 12px; white-space: nowrap; }
+
+        /* 模拟元素：干扰源 (脉冲动画) */
+        .interference-source {
+            position: absolute; top: 60%; left: 55%;
+            width: 10px; height: 10px; background: var(--alert-red);
+            border-radius: 50%;
+            cursor: pointer;
+        }
+        .pulse {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            width: 20px; height: 20px; border: 1px solid var(--alert-red); border-radius: 50%;
+            animation: pulse-anim 2s infinite;
+        }
+        .interference-line {
+            position: absolute; top: 31%; left: 41%; width: 150px; height: 180px;
+            border-left: 2px dashed var(--alert-red);
+            transform: rotate(-20deg); opacity: 0.6;
+        }
+
+        /* --- Zone C: 右侧分析面板 --- */
+        .analysis-panel {
+            flex: 35; /* 占比 35% */
+            display: flex;
+            flex-direction: column;
+            background-color: var(--panel-bg);
+        }
+
+        /* C1: 频谱图 */
+        .spectrum-view {
+            flex: 1;
+            border-bottom: 1px solid var(--border-color);
+            padding: 10px;
+            position: relative;
+        }
+        .panel-title { color: var(--accent-blue); font-size: 14px; margin-bottom: 10px; border-left: 3px solid var(--accent-blue); padding-left: 10px; }
+        /* 模拟瀑布图 */
+        .waterfall-canvas {
+            width: 100%; height: 85%;
+            background: linear-gradient(180deg, #000 0%, #1a0b00 40%, #4a0000 50%, #1a0b00 60%, #000 100%);
+            position: relative;
+            overflow: hidden;
+        }
+        .scan-line {
+            width: 100%; height: 2px; background: rgba(255, 255, 255, 0.5);
+            position: absolute; top: 0;
+            animation: scan 3s infinite linear;
+        }
+        .signal-spike {
+            position: absolute; bottom: 0; left: 45%; width: 40px; height: 80px;
+            background: linear-gradient(0deg, rgba(255,46,99,0.2), rgba(255,46,99,0.8));
+            border-top: 2px solid var(--alert-red);
+        }
+
+        /* C2: 详情卡片 */
+        .details-view {
+            flex: 1;
+            padding: 15px;
+            font-size: 13px;
+        }
+        .data-table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+        .data-table td { padding: 8px 5px; border-bottom: 1px solid #333; }
+        .label { color: #888; }
+        .value { color: #fff; text-align: right; }
+        .value.alert { color: var(--alert-red); font-weight: bold; text-shadow: 0 0 5px var(--alert-red); }
+
+        /* --- Zone D: 底部告警 --- */
+        .footer {
+            height: 40px;
+            background-color: #1a0505; /* 微红背景 */
+            border-top: 1px solid var(--alert-red);
+            display: flex;
+            align-items: center;
+            padding: 0 20px;
+            font-size: 14px;
+        }
+        .alert-badge { background: var(--alert-red); color: white; padding: 2px 8px; border-radius: 4px; margin-right: 15px; font-weight: bold; }
+        .log-text { color: #ffcccb; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+        /* --- 动画定义 --- */
+        @keyframes pulse-anim {
+            0% { width: 10px; height: 10px; opacity: 1; }
+            100% { width: 60px; height: 60px; opacity: 0; }
+        }
+        @keyframes scan {
+            0% { top: 0%; } 100% { top: 100%; }
+        }
+        @keyframes orbit {
+            0% { transform: translate(0, 0); }
+            50% { transform: translate(20px, -10px); }
+            100% { transform: translate(0, 0); }
+        }
+    </style>
+</head>
+<body>
+
+    <header class="header">
+        <div class="logo">SAT-GUARD <span style="font-size:12px; color: #888;">v2.0</span></div>
+        <div class="system-status">
+            <div class="status-item">UTC: <span id="clock">12:45:33</span></div>
+            <div class="status-item"><div class="dot"></div> 传感器阵列: 在线</div>
+            <div class="status-item"><div class="dot" style="background:orange; box-shadow:0 0 5px orange;"></div> 定位引擎: 繁忙</div>
+        </div>
+    </header>
+
+    <div class="main-container">
+        <section class="map-view">
+            <div class="grid-lines"></div>
+            <div style="position: absolute; top:10px; left:10px; color:#555;">LAT: 34.5501 N <br>LON: 108.9320 E</div>
+            
+            <div class="satellite">
+                <div class="satellite-label">SAT-03 (通信星)</div>
+            </div>
+
+            <div class="interference-line"></div>
+
+            <div class="interference-source">
+                <div class="pulse"></div>
+                <div style="position:absolute; top:20px; left:-40px; color:var(--alert-red); width:100px; text-align:center;">
+                    ⚠ 非法干扰源<br><span style="font-size:10px">置信度 95%</span>
+                </div>
+            </div>
+        </section>
+
+        <aside class="analysis-panel">
+            <div class="spectrum-view">
+                <div class="panel-title">频谱监测 (Real-time Spectrum)</div>
+                <div class="waterfall-canvas">
+                    <div class="scan-line"></div>
+                    <div class="signal-spike"></div>
+                    <div style="position:absolute; bottom:5px; left:5px; font-size:10px; color:#666;">1500 MHz</div>
+                    <div style="position:absolute; bottom:5px; right:5px; font-size:10px; color:#666;">1600 MHz</div>
+                </div>
+                <div style="margin-top:5px; font-size:12px; color:var(--accent-cyan);">当前频段: L-Band (1.5GHz)</div>
+            </div>
+
+            <div class="details-view">
+                <div class="panel-title">信号特征分析 (Signal Intelligence)</div>
+                <table class="data-table">
+                    <tr><td class="label">信号 ID</td><td class="value">SIG-2023-X99</td></tr>
+                    <tr><td class="label">中心频率</td><td class="value">1575.42 MHz</td></tr>
+                    <tr><td class="label">带宽 (BW)</td><td class="value">2.046 MHz</td></tr>
+                    <tr><td class="label">调制方式</td><td class="value">BPSK / 未知扩频</td></tr>
+                    <tr><td class="label">功率电平</td><td class="value">-85 dBm (异常高)</td></tr>
+                    <tr><td class="label">分类结果</td><td class="value alert">⚠ GPS 压制干扰</td></tr>
+                    <tr><td class="label">地理定位</td><td class="value">34.51N, 108.91E</td></tr>
+                </table>
+                <div style="margin-top: 15px; padding: 10px; background: rgba(255, 46, 99, 0.1); border: 1px solid var(--alert-red); color: var(--alert-red);">
+                    建议行动: 调度无人机进行近场查证
+                </div>
+            </div>
+        </aside>
+    </div>
+
+    <footer class="footer">
+        <span class="alert-badge">CRITICAL</span>
+        <span class="log-text">[12:45:30] 检测到针对 SAT-03 的持续上行链路干扰，特征匹配度 98%。已自动触发 TDOA 定位请求...</span>
+    </footer>
+
+</body>
+</html>

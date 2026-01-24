@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>SAT-COMMAND 信号侦测调度系统</title>
+    <style>
+        :root {
+            --bg-dark: #0f1115;
+            --panel-bg: #181b21;
+            --header-bg: #121418;
+            --border-col: #2d333b;
+            --text-main: #e6edf3;
+            --text-sub: #8b949e;
+            
+            /* 状态色 */
+            --status-idle: #3fb950;  /* 绿色-空闲 */
+            --status-busy: #d29922;  /* 黄色-任务中 */
+            --status-moving: #2f81f7; /* 蓝色-转动中 */
+            --status-alert: #f85149; /* 红色-告警 */
+            
+            --accent: #2f81f7;
+        }
+
+        body {
+            margin: 0;
+            background-color: var(--bg-dark);
+            color: var(--text-main);
+            font-family: 'Segoe UI', 'Roboto', monospace;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        /* --- 顶部 --- */
+        header {
+            height: 50px;
+            background: var(--header-bg);
+            border-bottom: 1px solid var(--border-col);
+            display: flex;
+            align-items: center;
+            padding: 0 20px;
+            justify-content: space-between;
+        }
+        .brand { font-weight: 700; letter-spacing: 1px; color: var(--accent); }
+        .sys-info { font-size: 12px; color: var(--text-sub); display: flex; gap: 15px; }
+
+        /* --- 主布局 --- */
+        .layout-grid {
+            flex: 1;
+            display: flex;
+            padding: 10px;
+            gap: 10px;
+        }
+
+        /* 通用面板样式 */
+        .panel {
+            background: var(--panel-bg);
+            border: 1px solid var(--border-col);
+            border-radius: 6px;
+            display: flex;
+            flex-direction: column;
+        }
+        .panel-head {
+            padding: 10px 15px;
+            border-bottom: 1px solid var(--border-col);
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--text-sub);
+            text-transform: uppercase;
+            display: flex;
+            justify-content: space-between;
+        }
+
+        /* 1. 左侧：天线控制 (20%) */
+        .col-antennas { flex: 0 0 220px; gap: 10px; display: flex; flex-direction: column; }
+        .ant-card {
+            background: #21262d;
+            border: 1px solid var(--border-col);
+            border-radius: 4px;
+            padding: 10px;
+            margin-bottom: 8px;
+            position: relative;
+        }
+        .ant-card.active { border-color: var(--status-busy); box-shadow: 0 0 5px rgba(210, 153, 34, 0.2); }
+        .ant-header { display: flex; justify-content: space-between; margin-bottom: 5px; }
+        .ant-name { font-weight: bold; font-size: 14px; }
+        .ant-band { font-size: 10px; background: #333; padding: 2px 4px; border-radius: 2px; }
+        .ant-status { font-size: 11px; margin-top: 5px; display: flex; align-items: center; gap: 5px; }
+        .status-dot { width: 8px; height: 8px; border-radius: 50%; background: #555; }
+        
+        /* 状态修饰类 */
+        .st-idle { color: var(--status-idle); } .dot-idle { background: var(--status-idle); }
+        .st-busy { color: var(--status-busy); } .dot-busy { background: var(--status-busy); }
+        .st-moving { color: var(--status-moving); } .dot-moving { background: var(--status-moving); }
+
+        /* 2. 中间：拓扑与矩阵 (55%) */
+        .col-center { flex: 1; display: flex; flex-direction: column; gap: 10px; }
+        
+        /* 拓扑视图 */
+        .topology-view {
+            flex: 3;
+            position: relative;
+            background: #0d1117;
+            overflow: hidden;
+        }
+        /* SVG 连线层 */
+        svg.connections { position: absolute; top:0; left:0; width:100%; height:100%; pointer-events: none; }
+        
+        /* 矩阵布局模拟 */
+        .matrix-container {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            height: 100%;
+            padding: 0 40px;
+            z-index: 2;
+        }
+        .node-column { display: flex; flex-direction: column; gap: 20px; justify-content: center; }
+        
+        .matrix-box {
+            width: 80px; height: 160px;
+            background: #161b22; border: 2px solid var(--border-col);
+            display: flex; align-items: center; justify-content: center;
+            color: #555; font-size: 12px; text-align: center;
+            z-index: 2;
+            box-shadow: 0 0 10px rgba(0,0,0,0.5);
+        }
+
+        /* 接收机机架样式 */
+        .receiver-rack {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 10px;
+            background: #161b22;
+            padding: 10px;
+            border: 1px solid #333;
+            border-radius: 4px;
+        }
+        .rcv-unit {
+            width: 100px; height: 30px;
+            background: #0f1115;
+            border: 1px solid #333;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 8px;
+            font-size: 11px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .rcv-unit:hover { border-color: var(--accent); }
+        .rcv-unit.selected { border-color: var(--accent); background: rgba(47, 129, 247, 0.1); }
+        .rcv-unit.active { border-left: 3px solid var(--status-busy); }
+
+        /* 信号分析窗 */
+        .signal-analysis { flex: 2; position: relative; }
+        .spectrum-mock {
+            width: 100%; height: 100%;
+            background: linear-gradient(180deg, rgba(0,0,0,0.8), rgba(0,20,40,0.8));
+            position: relative;
+        }
+        .signal-line {
+            position: absolute; bottom: 20px; left: 0; right: 0; height: 100px;
+            border-top: 2px solid var(--accent);
+            background: linear-gradient(to bottom, rgba(47,129,247,0.2), transparent);
+            clip-path: polygon(0% 100%, 10% 100%, 15% 20%, 20% 100%, 40% 100%, 45% 50%, 50% 100%, 100% 100%);
+        }
+
+        /* 3. 右侧：任务队列 (25%) */
+        .col-tasks { flex: 0 0 280px; }
+        .task-list { overflow-y: auto; flex: 1; padding: 10px; }
+        .task-item {
+            background: #21262d; border-left: 3px solid var(--border-col);
+            padding: 10px; margin-bottom: 8px; border-radius: 0 4px 4px 0;
+        }
+        .task-item.running { border-left-color: var(--status-busy); background: rgba(210, 153, 34, 0.05); }
+        .task-item.alert { border-left-color: var(--status-alert); background: rgba(248, 81, 73, 0.1); }
+        
+        .task-meta { display: flex; justify-content: space-between; font-size: 11px; color: var(--text-sub); margin-bottom: 4px; }
+        .task-title { font-weight: bold; font-size: 13px; margin-bottom: 4px; }
+        .task-progress { height: 3px; background: #333; margin-top: 8px; border-radius: 2px; overflow: hidden; }
+        .bar { height: 100%; background: var(--status-busy); width: 45%; }
+        
+        .btn-new {
+            background: var(--accent); color: white; border: none;
+            padding: 8px; border-radius: 4px; margin: 10px; cursor: pointer;
+            font-weight: 600;
+        }
+
+        /* 连线动画 */
+        @keyframes flow { to { stroke-dashoffset: -20; } }
+        .link-line { fill: none; stroke: #333; stroke-width: 2; }
+        .link-active { stroke: var(--status-busy); stroke-dasharray: 5; animation: flow 0.5s linear infinite; stroke-width: 2; }
+
+    </style>
+</head>
+<body>
+
+<header>
+    <div class="brand">📡 SAT-COMMAND 任务调度中心</div>
+    <div class="sys-info">
+        <span>矩阵状态: 正常</span>
+        <span>接收机在线: 10/10</span>
+        <span>UTC: 2023-10-27 14:30:55</span>
+    </div>
+</header>
+
+<div class="layout-grid">
+    
+    <div class="panel col-antennas">
+        <div class="panel-head">天线阵列 (4)</div>
+        <div style="padding: 10px; flex:1; overflow-y:auto;">
+            <div class="ant-card active">
+                <div class="ant-header">
+                    <span class="ant-name">ANT-01</span>
+                    <span class="ant-band" style="color:#ffa">C-Band</span>
+                </div>
+                <div class="ant-status st-busy">
+                    <div class="dot-busy"></div> 跟踪中: SAT-ASIA-3
+                </div>
+                <div style="font-size:10px; color:#666; margin-top:5px;">AZ: 120.5° EL: 45.2°</div>
+            </div>
+            <div class="ant-card">
+                <div class="ant-header">
+                    <span class="ant-name">ANT-02</span>
+                    <span class="ant-band" style="color:#faa">X-Band</span>
+                </div>
+                <div class="ant-status st-idle">
+                    <div class="dot-idle"></div> 待机 (收藏位)
+                </div>
+            </div>
+            <div class="ant-card active">
+                <div class="ant-header">
+                    <span class="ant-name">ANT-03</span>
+                    <span class="ant-band" style="color:#aaf">Ku-Band</span>
+                </div>
+                <div class="ant-status st-moving">
+                    <div class="dot-moving"></div> 对星中...
+                </div>
+                <div style="font-size:10px; color:#666; margin-top:5px;">AZ: 90.0° -> 110.2°</div>
+            </div>
+            <div class="ant-card">
+                <div class="ant-header">
+                    <span class="ant-name">ANT-04</span>
+                    <span class="ant-band" style="color:#aff">Ka-Band</span>
+                </div>
+                <div class="ant-status st-idle">
+                    <div class="dot-idle"></div> 维护模式
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-center">
+        
+        <div class="panel topology-view">
+            <div class="panel-head">
+                <span>信号路由拓扑 (Matrix Routing)</span>
+                <span style="font-size:11px; color:#666;">RF SWITCH: AUTO-MODE</span>
+            </div>
+            
+            <svg class="connections">
+                <path d="M 50 60 L 200 100" class="link-active"></path> <path d="M 50 180 L 200 100" class="link-active"></path> <path d="M 280 100 L 450 60" class="link-active"></path> <path d="M 280 100 L 450 120" class="link-active"></path> </svg>
+
+            <div class="matrix-container">
+                <div class="node-column">
+                    <div style="color:#888; font-size:10px;">ANT INPUTS</div>
+                    </div>
+
+                <div class="matrix-box">
+                    RF SWITCH<br>MATRIX<br>4 x 10
+                </div>
+
+                <div class="node-column">
+                    <div style="color:#888; font-size:10px; margin-bottom:5px;">RECEIVER POOL (10)</div>
+                    <div class="receiver-rack">
+                        <div class="rcv-unit active"><span>RCV-01</span><span class="st-busy">●</span></div>
+                        <div class="rcv-unit"><span>RCV-02</span><span class="st-idle">○</span></div>
+                        <div class="rcv-unit active selected"><span>RCV-03</span><span class="st-busy">●</span></div>
+                        <div class="rcv-unit"><span>RCV-04</span><span class="st-idle">○</span></div>
+                        <div class="rcv-unit"><span>RCV-05</span><span class="st-idle">○</span></div>
+                        <div class="rcv-unit"><span>RCV-06</span><span class="st-idle">○</span></div>
+                        <div class="rcv-unit"><span>RCV-07</span><span class="st-idle">○</span></div>
+                        <div class="rcv-unit"><span>RCV-08</span><span class="st-idle">○</span></div>
+                        <div class="rcv-unit"><span>RCV-09</span><span class="st-idle">○</span></div>
+                        <div class="rcv-unit"><span>RCV-10</span><span class="st-idle">○</span></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="panel signal-analysis">
+            <div class="panel-head">
+                <span>实时信号分析 - RCV-03</span>
+                <span class="st-busy" style="font-size:11px;">Target: SAT-ASIA-3 (Ku-Band)</span>
+            </div>
+            <div class="spectrum-mock">
+                <div class="signal-line"></div>
+                <div style="position: absolute; top: 10px; right: 10px; background: rgba(248, 81, 73, 0.2); border: 1px solid var(--status-alert); padding: 5px 10px; color: var(--status-alert); font-size: 12px; border-radius: 4px;">
+                    ⚠ 检测到特征信号: BPSK_Mod
+                </div>
+                <div style="position: absolute; bottom: 5px; left: 10px; font-size: 10px; color: #666;">
+                    CF: 12.55 GHz | SPAN: 50 MHz | RBW: 30 kHz
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="panel col-tasks">
+        <div class="panel-head">任务调度队列</div>
+        <button class="btn-new">+ 新建侦测任务</button>
+        
+        <div class="task-list">
+            <div style="font-size:10px; color:#666; margin-bottom:5px;">正在运行 (2)</div>
+            
+            <div class="task-item running">
+                <div class="task-meta"><span>TASK-1024</span><span>00:15:30</span></div>
+                <div class="task-title">SAT-ASIA-3 频谱监视</div>
+                <div style="font-size:11px; color:#888;">资源: ANT-01(C) -> RCV-01</div>
+                <div class="task-progress"><div class="bar" style="width: 60%"></div></div>
+            </div>
+
+            <div class="task-item alert">
+                <div class="task-meta"><span>TASK-1025</span><span>00:02:10</span></div>
+                <div class="task-title">高优先级干扰查证</div>
+                <div style="font-size:11px; color:#888;">资源: ANT-03(Ku) -> RCV-03</div>
+                <div style="margin-top:5px; color:var(--status-alert); font-size:11px;">⚠ 触发特征告警</div>
+                <div class="task-progress"><div class="bar" style="width: 20%; background:var(--status-alert)"></div></div>
+            </div>
+
+            <div style="font-size:10px; color:#666; margin:15px 0 5px;">等待队列 (1)</div>
+            
+            <div class="task-item">
+                <div class="task-meta"><span>TASK-1026</span><span>待定</span></div>
+                <div class="task-title">全频段扫描 (Ka)</div>
+                <div style="font-size:11px; color:#888;">等待 ANT-04 维护结束</div>
+            </div>
+        </div>
+    </div>
+
+</div>
+
+</body>
+</html>
