@@ -4,7 +4,7 @@
       <div class="title-group">
         <h2>🛰️ 卫星多普勒实时监控中心</h2>
         <span class="badge live" v-if="realtimeStatus === 'connected'">● LIVE SIGNAL</span>
-        <span class="badge error" v-else-if="realtimeStatus === 'error'">● CONNECTION ERROR</span>
+        <span class="badge error" v-else-if="realtimeStatus === 'error'">● ERROR</span>
         <span class="badge" v-else>● CONNECTING...</span>
       </div>
 
@@ -16,10 +16,21 @@
           </select>
         </div>
 
+        <div class="control-item freq-group">
+          <label>中心频率 (多选):</label>
+          <div class="checkbox-wrapper">
+            <label v-for="freq in availableFreqs" :key="freq" class="checkbox-label">
+              <input type="checkbox" :value="freq" v-model="selectedFreqs" @change="handleFreqChange"
+                :disabled="loading">
+              <span class="freq-text">{{ freq }}</span>
+            </label>
+          </div>
+        </div>
+
         <div class="control-item">
           <label>监控周期:</label>
           <div class="btn-group">
-            <button v-for="days in [1,3, 7, 15, 30, 60, 90]" :key="days" :class="{ active: currentRangeDays === days }"
+            <button v-for="days in [1, 3, 7, 15, 30]" :key="days" :class="{ active: currentRangeDays === days }"
               @click="setRange(days)">
               近{{ days }}天
             </button>
@@ -29,9 +40,11 @@
     </div>
 
     <div class="meta-info">
-      <span>正在接收: <strong>{{ selectedSat }}</strong></span>
-      <span>当前缓存点数: <strong>{{ currentPoints }}</strong></span>
-      <span v-if="isZooming" class="warn-text">⚠️ 缩放浏览中 (自动滚屏已暂停)</span>
+      <span>卫星: <strong>{{ selectedSat }}</strong></span>
+      <span v-for="freq in selectedFreqs" :key="freq" class="freq-tag">
+        {{ freq }}
+      </span>
+      <span v-if="isZooming" class="warn-text">⚠️ 缩放中 (暂停滚屏)</span>
     </div>
 
     <div ref="chartRef" class="chart-box"></div>
@@ -44,45 +57,50 @@ import * as echarts from 'echarts';
 import axios from 'axios';
 import { HubConnectionBuilder } from '@microsoft/signalr';
 
-// --- 1. 配置常量 ---
-// 使用相对路径，触发 vite.config.ts 中的 proxy 规则
-// /api/Spectrum -> http://localhost:5000/Spectrum
 const API_BASE = '/api/Spectrum';
 const HUB_URL = '/api/spectrumHub';
 
-// --- 2. 状态定义 ---
+// --- 状态 ---
 const chartRef = ref(null);
 const chartInstance = shallowRef(null);
 const loading = ref(false);
-const satelliteList = ref(['SAT-A-L-V', 'SAT-A-S-H', 'SAT-B-X-V']);
-const selectedSat = ref('SAT-A-L-V');
-const currentRangeDays = ref(3);
-const currentPoints = ref(0);
 
-// 实时系统状态
-const realtimeStatus = ref('disconnected'); // disconnected, connected, error
-const isZooming = ref(false); // 是否处于用户交互/缩放状态
+const satelliteList = ref([]);
+const selectedSat = ref('');
+
+// 频率相关状态
+const availableFreqs = ref([]); // 当前卫星支持的所有频率
+const selectedFreqs = ref([]);  // 用户选中的频率数组
+
+const currentRangeDays = ref(3);
+const realtimeStatus = ref('disconnected');
+const isZooming = ref(false);
 let connection = null;
 
-// 全局时间锁 (用于固定 X 轴的总长度)
 const globalStartTs = ref(null);
 const globalEndTs = ref(null);
 
-// --- 3. SignalR 连接与实时处理 ---
+// 定义一组霓虹配色，用于区分不同曲线
+const lineColors = ['#00f2ff', '#ff00ee', '#ffee00', '#00ff6a', '#ff9900'];
+
+// --- 1. SignalR ---
 const initSignalR = async () => {
   connection = new HubConnectionBuilder()
     .withUrl(HUB_URL)
-    .withAutomaticReconnect() // 自动重连
+    .withAutomaticReconnect()
     .build();
 
-  // 监听后端推送的新数据
-  connection.on("ReceiveNewData", (satId, timestamp, value) => {
-    // 只有当推送的数据属于当前选中的卫星时，才更新图表
-    if (satId === selectedSat.value) {
-      handleRealtimeData(timestamp, value);
+  // 监听新签名: (satId, freq, timestamp, value)
+  connection.on("ReceiveNewData", (satId, freq, timestamp, value) => {
+    // 只有当: 
+    // 1. 卫星匹配
+    // 2. 该频率被用户选中
+    // 才更新图表
+    if (satId === selectedSat.value && selectedFreqs.value.includes(freq)) {
+      handleRealtimeData(freq, timestamp, value);
     }
   });
-debugger
+
   try {
     await connection.start();
     realtimeStatus.value = 'connected';
@@ -93,166 +111,234 @@ debugger
   }
 };
 
-const handleRealtimeData = (timestamp, value) => {
+const handleRealtimeData = (freq, timestamp, value) => {
   if (!chartInstance.value) return;
 
   const option = chartInstance.value.getOption();
-  // 获取当前 Series 的数据副本
-  const currentData = option.series[0].data;
 
-  // 1. 追加新数据
-  currentData.push([timestamp, value]);
-  currentPoints.value = currentData.length;
+  // 安全检查
+  if (!option.series) return;
 
-  // 2. 更新图表数据
-  chartInstance.value.setOption({
-    series: [{ data: currentData }]
-  });
+  // 找到对应频率的 Series 索引
+  const seriesIndex = option.series.findIndex(s => s.name === freq);
 
-  // 3. 处理视图滚动
-  // 如果用户不在缩放查看历史，则自动更新 X 轴的最大值，实现“向右滚动”效果
-  if (!isZooming.value) {
-    globalEndTs.value = timestamp; // 更新全局结束时间
+  if (seriesIndex !== -1) {
+    const currentData = option.series[seriesIndex].data;
+    currentData.push([timestamp, value]);
+
+    // 局部更新 series
     chartInstance.value.setOption({
-      xAxis: {
-        min: globalStartTs.value, // 起点固定 (或者也可以随之移动，看需求)
-        max: timestamp            // 终点跟随最新时间
-      }
+      series: [{
+        name: freq,
+        data: currentData
+      }]
+    });
+  }
+
+  // 滚屏逻辑
+  if (!isZooming.value) {
+    globalEndTs.value = timestamp;
+    chartInstance.value.setOption({
+      xAxis: { min: globalStartTs.value, max: timestamp }
     });
   }
 };
 
-// --- 4. ECharts 初始化 ---
-const initChart = () => {
-  chartInstance.value = echarts.init(chartRef.value, 'dark');
+// --- 2. 业务逻辑 ---
 
+// 初始化卫星列表
+const fetchSatellites = async () => {
+  try {
+    const res = await axios.get(`${API_BASE}/satellites`);
+    satelliteList.value = res.data;
+    if (satelliteList.value.length > 0) {
+      selectedSat.value = satelliteList.value[0];
+      await handleSatChange(); // 加载第一个卫星的配置
+    }
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+// 获取当前卫星支持的频率
+const fetchFrequencies = async () => {
+  try {
+    const res = await axios.get(`${API_BASE}/frequencies`, {
+      params: { satelliteId: selectedSat.value }
+    });
+    availableFreqs.value = res.data;
+    // 默认全选
+    selectedFreqs.value = [...res.data];
+  } catch (e) {
+    console.error("获取频率失败", e);
+  }
+};
+
+const handleSatChange = async () => {
+  // 切换卫星 -> 重新获取频率 -> 默认全选 -> 重新加载数据
+  await fetchFrequencies();
+  await setRange(currentRangeDays.value);
+};
+
+const handleFreqChange = () => {
+  // 勾选变化 -> 重新加载数据 
+  setRange(currentRangeDays.value);
+};
+
+// 初始化图表
+const initChart = () => {
+  debugger
+  chartInstance.value = echarts.init(chartRef.value, 'dark');
   const option = {
     backgroundColor: '#0b1221',
-    animation: false, // 实时高频刷新建议关闭动画
+    animation: false,
     tooltip: {
       trigger: 'axis',
       axisPointer: { type: 'cross' },
+      // 复杂的 tooltip，显示所有系列的值
       formatter: (params) => {
-        if (!params[0]) return '';
-        const date = new Date(params[0].value[0]);
-        return `${date.toLocaleString()}<br/>Freq: <b>${params[0].value[1].toFixed(2)} Hz</b>`;
+        if (!params.length) return '';
+        const date = new Date(params[0].value[0]).toLocaleTimeString();
+        let html = `<div>${date}</div>`;
+        params.forEach(p => {
+          html += `<div style="color:${p.color}">● ${p.seriesName}: <b>${p.value[1]} Hz</b></div>`;
+        });
+        return html;
       }
     },
-    grid: { top: 50, bottom: 40, left: 60, right: 20 },
-    // X 轴配置
+    legend: { show: true, top: 5, textStyle: { color: '#fff' } }, // 显示图例
+    grid: { top: 40, bottom: 40, left: 60, right: 20 },
     xAxis: {
       type: 'time',
       boundaryGap: false,
       axisLine: { lineStyle: { color: '#4a657a' } },
       splitLine: { show: false }
     },
-    // Y 轴配置
     yAxis: {
       type: 'value',
-      name: 'Doppler Shift (Hz)',
-      min: -6000,
-      max: 6000,
+      name: 'Hz',
+      min: -6000, max: 6000,
       splitLine: { lineStyle: { color: '#1f2d40', type: 'dashed' } }
     },
-    // 缩放组件
     dataZoom: [
       { type: 'slider', show: true, bottom: 5, height: 20 },
-      { type: 'inside' } // 支持鼠标滚轮
+      { type: 'inside' }
     ],
-    series: [{
-      name: 'Doppler',
-      type: 'line',
-      showSymbol: false, // 不显示小圆点，提升性能
-      smooth: true,      // 开启平滑
-      data: [],          // 初始为空
-      itemStyle: { color: '#00f2ff' },
-      lineStyle: { width: 1 },
-      areaStyle: {
-        opacity: 0.2,
-        color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-          { offset: 0, color: '#00f2ff' },
-          { offset: 1, color: 'transparent' }
-        ])
-      }
-    }]
+    series: [] // 动态生成
   };
 
-  chartInstance.value.setOption(option);
+  // 【DEBUG】: 打印看看 axis 是否存在，以及 data 是否为空
+  console.log('Debug ECharts Option:', JSON.stringify(option));
+  if (option.series && option.series.length > 0) {
+    chartInstance.value.setOption(option);
 
-  // 监听缩放事件，判断用户是否处于 "Zoom 模式"
+  }
+
+
   chartInstance.value.on('dataZoom', (evt) => {
     const opt = chartInstance.value.getOption();
-    const start = opt.dataZoom[0].start;
     const end = opt.dataZoom[0].end;
-
-    // 如果 end < 99.5，说明用户在查看历史数据，而不是最新的最右侧数据
-    // 此时标记 isZooming = true，暂停自动滚屏
     isZooming.value = end < 99.5;
   });
 };
 
-// --- 5. 业务逻辑 ---
-
-const handleSatChange = () => {
-  // 切换卫星时，重置数据并重新加载
-  setRange(currentRangeDays.value);
-};
-
 const setRange = async (days) => {
   if (loading.value) return;
-
   currentRangeDays.value = days;
   loading.value = true;
-  isZooming.value = false; // 重置缩放状态，回到 Live 模式
+  isZooming.value = false;
 
-  // 计算时间范围
   const end = new Date().getTime();
   const start = end - (days * 24 * 3600 * 1000);
-
-  // 锁定全局 X 轴范围
   globalStartTs.value = start;
   globalEndTs.value = end;
 
-  // 1. 先设置坐标轴范围，并重置缩放条
+  // 重置坐标轴，清空 Series
   chartInstance.value.setOption({
-    xAxis: { min: start, max: end },
-    dataZoom: [{ start: 0, end: 100 }, { start: 0, end: 100 }]
-  });
+    // 必须补全所有基础配置
+    grid: { top: 40, bottom: 40, left: 60, right: 20 }, // 之前的样式
+    tooltip: { trigger: 'axis' },
+    xAxis: {
+      type: 'time', // ✅ 必须加回来
+      boundaryGap: false,
+      min: start,
+      max: end
+    },
+    yAxis: { // ✅ 必须加回来
+      type: 'value',
+      min: -6000,
+      max: 6000
+    },
+    dataZoom: [{ start: 0, end: 100 }, { type: 'inside' }],
+    series: []
+  }, { notMerge: true }); // 这样才不会报错
+
+  // 如果没有选频率，直接返回
+  if (selectedFreqs.value.length === 0) {
+    loading.value = false;
+    return;
+  }
 
   try {
-    // 2. 请求历史数据 (LTTB 压缩版)
-    // 路径: /api/Spectrum/data
+    // 构造参数: 
+    // 使用 URLSearchParams 手动序列化数组，兼容 ASP.NET Core 的 Model Binding
     const res = await axios.get(`${API_BASE}/data`, {
       params: {
         satelliteId: selectedSat.value,
+        frequencies: selectedFreqs.value,
         startTime: start,
         endTime: end,
-        threshold: 2000 // 这里的 2000 是告诉后端：无论几天数据，给我压缩成2000个点
+        threshold: 2000
+      },
+      paramsSerializer: params => {
+        const p = new URLSearchParams();
+        p.append("satelliteId", params.satelliteId);
+        p.append("startTime", params.startTime);
+        p.append("endTime", params.endTime);
+        p.append("threshold", params.threshold);
+        // 手动处理数组
+        if (Array.isArray(params.frequencies)) {
+          params.frequencies.forEach(f => p.append("frequencies", f));
+        }
+        return p.toString();
       }
     });
 
-    const historicalData = res.data.data;
-    currentPoints.value = historicalData.length;
+    const dataDict = res.data.data || {}; // { "2200MHz": [...], "8450MHz": [...] }
 
-    // 3. 全量更新 Series
+    // 构造多条 Series
+    const newSeries = Object.keys(dataDict).map((freq, index) => ({
+      name: freq,
+      type: 'line',
+      showSymbol: false,
+      smooth: true,
+      data: dataDict[freq],
+      itemStyle: { color: lineColors[index % lineColors.length] }, // 轮询颜色
+      lineStyle: { width: 1 },
+      areaStyle: {
+        opacity: 0.1,
+        color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+          { offset: 0, color: lineColors[index % lineColors.length] },
+          { offset: 1, color: 'transparent' }
+        ])
+      }
+    }));
+
     chartInstance.value.setOption({
-      series: [{ data: historicalData }]
+      series: newSeries
     });
 
   } catch (err) {
-    console.error("加载历史数据失败", err);
-    // 这里可以加一个 UI 提示
+    console.error(err);
   } finally {
     loading.value = false;
   }
 };
 
-// --- 6. 生命周期管理 ---
-onMounted(() => {
-  initChart();     // 1. 初始化空图表
-  initSignalR();   // 2. 连接 WebSocket
-  setRange(3);     // 3. 加载默认历史数据
-
+onMounted(async () => {
+  initChart();
+  initSignalR();
+  await fetchSatellites(); // 获取卫星列表并触发加载
   window.addEventListener('resize', () => chartInstance.value?.resize());
 });
 
@@ -263,7 +349,6 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-/* 保持原有样式，深色科技风 */
 .chart-container {
   height: 100vh;
   background: #080f1a;
@@ -271,29 +356,28 @@ onUnmounted(() => {
   padding: 20px;
   display: flex;
   flex-direction: column;
-  box-sizing: border-box;
 }
 
 .header {
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
-  margin-bottom: 15px;
   border-bottom: 1px solid #1f2d40;
   padding-bottom: 15px;
+  margin-bottom: 10px;
 }
 
 .title-group h2 {
   margin: 0;
   font-size: 1.5rem;
   color: #e0e6ed;
-  margin-bottom: 5px;
 }
 
 .control-bar {
   display: flex;
   gap: 20px;
   align-items: flex-end;
+  flex-wrap: wrap;
 }
 
 .control-item {
@@ -311,18 +395,44 @@ select {
   background: #162233;
   color: #00f2ff;
   border: 1px solid #4a657a;
-  padding: 5px 10px;
+  padding: 5px;
   border-radius: 4px;
   outline: none;
-  font-weight: bold;
+}
+
+/* 复选框样式 */
+.checkbox-wrapper {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  background: #162233;
+  padding: 5px 10px;
+  border-radius: 4px;
+  border: 1px solid #4a657a;
+  height: 26px;
+}
+
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
   cursor: pointer;
+  user-select: none;
+}
+
+.freq-text {
+  font-size: 13px;
+  color: #c0c6d1;
+}
+
+input[type="checkbox"] {
+  accent-color: #00f2ff;
 }
 
 .btn-group {
   display: flex;
   border: 1px solid #4a657a;
   border-radius: 4px;
-  overflow: hidden;
 }
 
 .btn-group button {
@@ -333,7 +443,6 @@ select {
   cursor: pointer;
   border-right: 1px solid #4a657a;
   transition: 0.2s;
-  font-size: 13px;
 }
 
 .btn-group button:last-child {
@@ -346,43 +455,21 @@ select {
   font-weight: bold;
 }
 
-.btn-group button:hover:not(.active) {
-  background: rgba(0, 242, 255, 0.1);
-}
-
-.badge {
-  font-size: 10px;
-  padding: 2px 6px;
-  border-radius: 4px;
-  font-weight: bold;
-  display: inline-block;
-  background: #555;
-  color: #ccc;
-}
-
-.badge.live {
-  background: #00ff6a;
-  color: #000;
-  box-shadow: 0 0 8px rgba(0, 255, 106, 0.4);
-}
-
-.badge.error {
-  background: #ff4d4f;
-  color: white;
-}
-
 .meta-info {
-  text-align: right;
-  font-size: 12px;
-  color: #58697a;
-  margin-bottom: 5px;
   display: flex;
-  gap: 15px;
+  gap: 10px;
   justify-content: flex-end;
+  font-size: 12px;
+  margin-bottom: 5px;
+  align-items: center;
 }
 
-.meta-info strong {
+.freq-tag {
+  background: rgba(0, 242, 255, 0.1);
   color: #00f2ff;
+  padding: 2px 6px;
+  border-radius: 3px;
+  border: 1px solid rgba(0, 242, 255, 0.3);
 }
 
 .warn-text {
@@ -394,7 +481,22 @@ select {
   flex: 1;
   border: 1px solid #1f2d40;
   background: #0b1221;
+}
+
+.badge {
+  font-size: 10px;
+  padding: 2px 6px;
   border-radius: 4px;
+  background: #555;
+}
+
+.badge.live {
+  background: #00ff6a;
+  color: #000;
+}
+
+.badge.error {
+  background: #ff4d4f;
 }
 
 @keyframes blink {
