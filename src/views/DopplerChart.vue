@@ -2,40 +2,36 @@
   <div class="chart-container">
     <div class="header">
       <div class="title-group">
-        <h2>卫星多普勒分析系统</h2>
-        <span class="badge" v-if="loading">LOADING...</span>
-        <span class="badge error" v-if="errorMsg">{{ errorMsg }}</span>
+        <h2>🛰️ 卫星多普勒实时监控中心</h2>
+        <span class="badge live" v-if="realtimeStatus === 'connected'">● LIVE SIGNAL</span>
+        <span class="badge error" v-else-if="realtimeStatus === 'error'">● CONNECTION ERROR</span>
+        <span class="badge" v-else>● CONNECTING...</span>
       </div>
-      
-      <div class="search-bar">
-        <div class="input-group">
-          <label>Start:</label>
-          <input type="datetime-local" v-model="searchStart" step="1">
+
+      <div class="control-bar">
+        <div class="control-item">
+          <label>目标卫星:</label>
+          <select v-model="selectedSat" @change="handleSatChange" :disabled="loading">
+            <option v-for="sat in satelliteList" :key="sat" :value="sat">{{ sat }}</option>
+          </select>
         </div>
-        <div class="input-group">
-          <label>End:</label>
-          <input type="datetime-local" v-model="searchEnd" step="1">
-        </div>
-        
-        <button @click="handleManualSearch" :disabled="loading" class="btn-search">
-          查询范围
-        </button>
-        
-        <div class="quick-actions">
-          <button @click="setRange(3)">近3天</button>
-          <button @click="setRange(7)">近7天</button>
-          <button @click="setRange(15)">近15天</button>
-          <button @click="setRange(30)">近30天</button>
-          <button @click="setRange(60)">近60天</button>
-          <button @click="setRange(90)">近90天</button>
+
+        <div class="control-item">
+          <label>监控周期:</label>
+          <div class="btn-group">
+            <button v-for="days in [3, 7, 15, 30, 60, 90]" :key="days" :class="{ active: currentRangeDays === days }"
+              @click="setRange(days)">
+              近{{ days }}天
+            </button>
+          </div>
         </div>
       </div>
     </div>
 
     <div class="meta-info">
-      <span>当前视窗点数: <strong>{{ currentPoints }}</strong></span>
-      <span>后端压缩阈值: <strong>2000</strong></span>
-      <span class="hint">(LTTB 动态降采样已激活)</span>
+      <span>正在接收: <strong>{{ selectedSat }}</strong></span>
+      <span>当前缓存点数: <strong>{{ currentPoints }}</strong></span>
+      <span v-if="isZooming" class="warn-text">⚠️ 缩放浏览中 (自动滚屏已暂停)</span>
     </div>
 
     <div ref="chartRef" class="chart-box"></div>
@@ -43,340 +39,373 @@
 </template>
 
 <script setup>
-import { ref, onMounted, shallowRef } from 'vue';
+import { ref, onMounted, onUnmounted, shallowRef } from 'vue';
 import * as echarts from 'echarts';
 import axios from 'axios';
+import { HubConnectionBuilder } from '@microsoft/signalr';
 
-// --- 1. 状态定义 ---
+// --- 1. 配置常量 ---
+// 使用相对路径，触发 vite.config.ts 中的 proxy 规则
+// /api/Spectrum -> http://localhost:5000/Spectrum
+const API_BASE = '/api/Spectrum';
+const HUB_URL = '/api/spectrumHub';
+
+// --- 2. 状态定义 ---
 const chartRef = ref(null);
-const chartInstance = shallowRef(null); // 使用 shallowRef 优化 ECharts 性能
+const chartInstance = shallowRef(null);
 const loading = ref(false);
-const errorMsg = ref('');
+const satelliteList = ref(['SAT-A-L-V', 'SAT-A-S-H', 'SAT-B-X-V']);
+const selectedSat = ref('SAT-A-L-V');
+const currentRangeDays = ref(3);
 const currentPoints = ref(0);
 
-// 时间输入框绑定
-const searchStart = ref('');
-const searchEnd = ref('');
+// 实时系统状态
+const realtimeStatus = ref('disconnected'); // disconnected, connected, error
+const isZooming = ref(false); // 是否处于用户交互/缩放状态
+let connection = null;
 
-// 全局时间范围锁 (修复缩放无法还原的关键)
+// 全局时间锁 (用于固定 X 轴的总长度)
 const globalStartTs = ref(null);
 const globalEndTs = ref(null);
 
-const API_URL = '/api/spectrum/GetSpectrumData';
+// --- 3. SignalR 连接与实时处理 ---
+const initSignalR = async () => {
+  connection = new HubConnectionBuilder()
+    .withUrl(HUB_URL)
+    .withAutomaticReconnect() // 自动重连
+    .build();
 
-// --- 2. 辅助函数 ---
-// 格式化 Date 对象为 input type="datetime-local" 需要的格式 (yyyy-MM-ddTHH:mm:ss)
-const formatDateForInput = (date) => {
-  const pad = (n) => (n < 10 ? '0' + n : n);
-  return (
-    date.getFullYear() +
-    '-' +
-    pad(date.getMonth() + 1) +
-    '-' +
-    pad(date.getDate()) +
-    'T' +
-    pad(date.getHours()) +
-    ':' +
-    pad(date.getMinutes()) +
-    ':' +
-    pad(date.getSeconds())
-  );
+  // 监听后端推送的新数据
+  connection.on("ReceiveNewData", (satId, timestamp, value) => {
+    // 只有当推送的数据属于当前选中的卫星时，才更新图表
+    if (satId === selectedSat.value) {
+      handleRealtimeData(timestamp, value);
+    }
+  });
+debugger
+  try {
+    await connection.start();
+    realtimeStatus.value = 'connected';
+    console.log("SignalR Connected");
+  } catch (err) {
+    console.error("SignalR Connection Error", err);
+    realtimeStatus.value = 'error';
+  }
 };
 
-// --- 3. 初始化图表 ---
+const handleRealtimeData = (timestamp, value) => {
+  if (!chartInstance.value) return;
+
+  const option = chartInstance.value.getOption();
+  // 获取当前 Series 的数据副本
+  const currentData = option.series[0].data;
+
+  // 1. 追加新数据
+  currentData.push([timestamp, value]);
+  currentPoints.value = currentData.length;
+
+  // 2. 更新图表数据
+  chartInstance.value.setOption({
+    series: [{ data: currentData }]
+  });
+
+  // 3. 处理视图滚动
+  // 如果用户不在缩放查看历史，则自动更新 X 轴的最大值，实现“向右滚动”效果
+  if (!isZooming.value) {
+    globalEndTs.value = timestamp; // 更新全局结束时间
+    chartInstance.value.setOption({
+      xAxis: {
+        min: globalStartTs.value, // 起点固定 (或者也可以随之移动，看需求)
+        max: timestamp            // 终点跟随最新时间
+      }
+    });
+  }
+};
+
+// --- 4. ECharts 初始化 ---
 const initChart = () => {
-  if (!chartRef.value) return;
-  
   chartInstance.value = echarts.init(chartRef.value, 'dark');
 
   const option = {
     backgroundColor: '#0b1221',
-    animation: false, // 大数据量下建议关闭动画以提升性能
+    animation: false, // 实时高频刷新建议关闭动画
     tooltip: {
       trigger: 'axis',
       axisPointer: { type: 'cross' },
       formatter: (params) => {
         if (!params[0]) return '';
         const date = new Date(params[0].value[0]);
-        const val = params[0].value[1];
-        return `${date.toLocaleString()}<br/>Doppler: <b>${val} Hz</b>`;
+        return `${date.toLocaleString()}<br/>Freq: <b>${params[0].value[1].toFixed(2)} Hz</b>`;
       }
     },
-    grid: { top: 40, bottom: 40, left: 60, right: 20 },
+    grid: { top: 50, bottom: 40, left: 60, right: 20 },
+    // X 轴配置
     xAxis: {
       type: 'time',
       boundaryGap: false,
-      // 注意：这里不设 min/max，由 handleManualSearch 动态设置
       axisLine: { lineStyle: { color: '#4a657a' } },
       splitLine: { show: false }
     },
+    // Y 轴配置
     yAxis: {
       type: 'value',
-      name: 'Shift (Hz)',
+      name: 'Doppler Shift (Hz)',
       min: -6000,
       max: 6000,
       splitLine: { lineStyle: { color: '#1f2d40', type: 'dashed' } }
     },
-    // 缩放组件配置
+    // 缩放组件
     dataZoom: [
-      {
-        type: 'slider',
-        show: true,
-        bottom: 5,
-        height: 20,
-        borderColor: '#4a657a',
-        fillerColor: 'rgba(0, 242, 255, 0.2)'
-      },
-      {
-        type: 'inside' // 支持鼠标滚轮缩放
-      }
+      { type: 'slider', show: true, bottom: 5, height: 20 },
+      { type: 'inside' } // 支持鼠标滚轮
     ],
-    series: [
-      {
-        name: 'Doppler',
-        type: 'line',
-        // 关键性能配置
-        showSymbol: false, 
-        smooth: true, // LTTB后点少，开启平滑视觉更好
-        data: [], 
-        itemStyle: { color: '#00f2ff' },
-        lineStyle: { width: 1 },
-        areaStyle: {
-          color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-            { offset: 0, color: 'rgba(0, 242, 255, 0.3)' },
-            { offset: 1, color: 'rgba(0, 242, 255, 0.0)' }
-          ])
-        }
+    series: [{
+      name: 'Doppler',
+      type: 'line',
+      showSymbol: false, // 不显示小圆点，提升性能
+      smooth: true,      // 开启平滑
+      data: [],          // 初始为空
+      itemStyle: { color: '#00f2ff' },
+      lineStyle: { width: 1 },
+      areaStyle: {
+        opacity: 0.2,
+        color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+          { offset: 0, color: '#00f2ff' },
+          { offset: 1, color: 'transparent' }
+        ])
       }
-    ]
+    }]
   };
 
   chartInstance.value.setOption(option);
 
-  // 监听缩放事件 (防抖处理)
-  let zoomTimer = null;
-  chartInstance.value.on('dataZoom', () => {
-    if (zoomTimer) clearTimeout(zoomTimer);
-    zoomTimer = setTimeout(handleChartZoom, 500); // 停止操作 500ms 后才请求
-  });
+  // 监听缩放事件，判断用户是否处于 "Zoom 模式"
+  chartInstance.value.on('dataZoom', (evt) => {
+    const opt = chartInstance.value.getOption();
+    const start = opt.dataZoom[0].start;
+    const end = opt.dataZoom[0].end;
 
-  // 默认加载近3天
-  setRange(3);
+    // 如果 end < 99.5，说明用户在查看历史数据，而不是最新的最右侧数据
+    // 此时标记 isZooming = true，暂停自动滚屏
+    isZooming.value = end < 99.5;
+  });
 };
 
-// --- 4. 业务逻辑：手动查询 (宏观) ---
-const handleManualSearch = async () => {
-  if (!searchStart.value || !searchEnd.value) return;
-  
-  const startTs = new Date(searchStart.value).getTime();
-  const endTs = new Date(searchEnd.value).getTime();
+// --- 5. 业务逻辑 ---
 
-  if (isNaN(startTs) || isNaN(endTs)) {
-    errorMsg.value = "时间格式无效";
-    return;
-  }
+const handleSatChange = () => {
+  // 切换卫星时，重置数据并重新加载
+  setRange(currentRangeDays.value);
+};
 
-  // 【核心修复】：锁定全局坐标系范围
-  globalStartTs.value = startTs;
-  globalEndTs.value = endTs;
+const setRange = async (days) => {
+  if (loading.value) return;
 
-  // 在加载数据前，强制设置 X 轴的 min 和 max
-  // 并重置 dataZoom 到 0-100% (看全貌)
+  currentRangeDays.value = days;
+  loading.value = true;
+  isZooming.value = false; // 重置缩放状态，回到 Live 模式
+
+  // 计算时间范围
+  const end = new Date().getTime();
+  const start = end - (days * 24 * 3600 * 1000);
+
+  // 锁定全局 X 轴范围
+  globalStartTs.value = start;
+  globalEndTs.value = end;
+
+  // 1. 先设置坐标轴范围，并重置缩放条
   chartInstance.value.setOption({
-    xAxis: {
-      min: startTs,
-      max: endTs
-    },
-    dataZoom: [
-      { start: 0, end: 100 },
-      { start: 0, end: 100 }
-    ]
+    xAxis: { min: start, max: end },
+    dataZoom: [{ start: 0, end: 100 }, { start: 0, end: 100 }]
   });
 
-  // 加载该范围的“概览”数据
-  await loadData(startTs, endTs);
-};
-
-// --- 5. 业务逻辑：图表缩放 (微观) ---
-const handleChartZoom = () => {
-  const option = chartInstance.value.getOption();
-  
-  // 获取当前视窗对应的时间戳范围
-  // 注意：在 type: 'time' 轴中，startValue/endValue 直接就是时间戳
-  const startTs = option.dataZoom[0].startValue;
-  const endTs = option.dataZoom[0].endValue;
-
-  // 如果当前视窗无效，或视窗几乎等于全局范围（没必要重复加载），则跳过
-  // 这里做一个简单的判断：如果 start/end 存在且有效
-  if (startTs != null && endTs != null) {
-    loadData(startTs, endTs);
-  }
-};
-
-// --- 6. 核心数据请求 ---
-const loadData = async (startTs, endTs) => {
   try {
-    loading.value = true;
-    errorMsg.value = '';
-
-    // 向后端请求数据
-    // 逻辑：无论请求范围是 30天 还是 1小时，threshold 始终限制点数为 2000
-    // 这保证了前端渲染永远流畅
-    const res = await axios.get(API_URL, {
+    // 2. 请求历史数据 (LTTB 压缩版)
+    // 路径: /api/Spectrum/data
+    const res = await axios.get(`${API_BASE}/data`, {
       params: {
-        startTime: Math.floor(startTs),
-        endTime: Math.floor(endTs),
-        threshold: 2000 
+        satelliteId: selectedSat.value,
+        startTime: start,
+        endTime: end,
+        threshold: 2000 // 这里的 2000 是告诉后端：无论几天数据，给我压缩成2000个点
       }
     });
 
-    // 更新状态
-    currentPoints.value = res.data.count;
+    const historicalData = res.data.data;
+    currentPoints.value = historicalData.length;
 
-    // 【重要】：只更新 series.data，绝对不要碰 xAxis 的 min/max
-    // ECharts 会自动将这批新数据放置在已锁定的 X 轴上的正确位置
+    // 3. 全量更新 Series
     chartInstance.value.setOption({
-      series: [{
-        data: res.data.data
-      }]
+      series: [{ data: historicalData }]
     });
 
   } catch (err) {
-    console.error(err);
-    errorMsg.value = '数据加载失败: ' + (err.message || '未知错误');
+    console.error("加载历史数据失败", err);
+    // 这里可以加一个 UI 提示
   } finally {
     loading.value = false;
   }
 };
 
-// --- 7. 快捷设置 ---
-const setRange = (days) => {
-  const end = new Date();
-  const start = new Date();
-  start.setDate(end.getDate() - days);
-
-  // 更新输入框
-  searchStart.value = formatDateForInput(start);
-  searchEnd.value = formatDateForInput(end);
-
-  // 触发查询
-  handleManualSearch();
-};
-
-// --- 生命周期 ---
+// --- 6. 生命周期管理 ---
 onMounted(() => {
-  initChart();
+  initChart();     // 1. 初始化空图表
+  initSignalR();   // 2. 连接 WebSocket
+  setRange(3);     // 3. 加载默认历史数据
+
   window.addEventListener('resize', () => chartInstance.value?.resize());
+});
+
+onUnmounted(() => {
+  if (connection) connection.stop();
+  chartInstance.value?.dispose();
 });
 </script>
 
 <style scoped>
-/* 布局样式 */
+/* 保持原有样式，深色科技风 */
 .chart-container {
   height: 100vh;
+  background: #080f1a;
+  color: white;
+  padding: 20px;
   display: flex;
   flex-direction: column;
-  background: #080f1a;
-  color: #fff;
-  padding: 20px;
   box-sizing: border-box;
-  font-family: 'Segoe UI', sans-serif;
 }
 
 .header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 15px;
   border-bottom: 1px solid #1f2d40;
   padding-bottom: 15px;
-  margin-bottom: 10px;
 }
 
-.title-group {
-  display: flex;
-  align-items: center;
-  margin-bottom: 15px;
+.title-group h2 {
+  margin: 0;
+  font-size: 1.5rem;
+  color: #e0e6ed;
+  margin-bottom: 5px;
 }
 
-h2 { margin: 0; font-size: 1.4rem; letter-spacing: 1px; color: #e0e6ed; }
-
-/* 搜索栏样式 */
-.search-bar {
+.control-bar {
   display: flex;
-  flex-wrap: wrap;
-  gap: 15px;
-  align-items: center;
-  background: #0f1826;
-  padding: 10px;
-  border-radius: 4px;
+  gap: 20px;
+  align-items: flex-end;
 }
 
-.input-group {
+.control-item {
   display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.control-item label {
+  font-size: 12px;
   color: #889bb3;
 }
 
-input[type="datetime-local"] {
+select {
   background: #162233;
-  border: 1px solid #4a657a;
   color: #00f2ff;
-  padding: 4px 8px;
-  border-radius: 3px;
+  border: 1px solid #4a657a;
+  padding: 5px 10px;
+  border-radius: 4px;
   outline: none;
-  font-family: monospace;
-}
-
-/* 按钮样式 */
-button {
-  background: transparent;
-  border: 1px solid #4a657a;
-  color: #c0c6d1;
-  padding: 5px 12px;
-  border-radius: 3px;
+  font-weight: bold;
   cursor: pointer;
+}
+
+.btn-group {
+  display: flex;
+  border: 1px solid #4a657a;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.btn-group button {
+  background: #162233;
+  border: none;
+  color: #c0c6d1;
+  padding: 6px 12px;
+  cursor: pointer;
+  border-right: 1px solid #4a657a;
+  transition: 0.2s;
   font-size: 13px;
-  transition: all 0.2s;
 }
 
-button:hover { border-color: #00f2ff; color: #00f2ff; }
-button:disabled { opacity: 0.5; cursor: not-allowed; }
-
-.btn-search {
-  background: rgba(0, 242, 255, 0.15);
-  border-color: #00f2ff;
-  color: #00f2ff;
-  font-weight: 600;
-  padding: 5px 20px;
+.btn-group button:last-child {
+  border-right: none;
 }
 
-.quick-actions { display: flex; gap: 8px; margin-left: auto; }
+.btn-group button.active {
+  background: #00f2ff;
+  color: #000;
+  font-weight: bold;
+}
 
-/* 信息栏与图表 */
+.btn-group button:hover:not(.active) {
+  background: rgba(0, 242, 255, 0.1);
+}
+
+.badge {
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-weight: bold;
+  display: inline-block;
+  background: #555;
+  color: #ccc;
+}
+
+.badge.live {
+  background: #00ff6a;
+  color: #000;
+  box-shadow: 0 0 8px rgba(0, 255, 106, 0.4);
+}
+
+.badge.error {
+  background: #ff4d4f;
+  color: white;
+}
+
 .meta-info {
   text-align: right;
   font-size: 12px;
   color: #58697a;
   margin-bottom: 5px;
+  display: flex;
+  gap: 15px;
+  justify-content: flex-end;
 }
-.meta-info strong { color: #00f2ff; margin: 0 5px; }
-.hint { font-style: italic; margin-left: 10px; }
+
+.meta-info strong {
+  color: #00f2ff;
+}
+
+.warn-text {
+  color: #ff9900;
+  animation: blink 2s infinite;
+}
 
 .chart-box {
   flex: 1;
-  width: 100%;
   border: 1px solid #1f2d40;
   background: #0b1221;
+  border-radius: 4px;
 }
 
-/* Badge 样式 */
-.badge {
-  background: #00f2ff;
-  color: #000;
-  font-size: 10px;
-  font-weight: bold;
-  padding: 2px 6px;
-  border-radius: 2px;
-  margin-left: 15px;
+@keyframes blink {
+
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.5;
+  }
 }
-.badge.error { background: #ff4d4f; color: white; }
 </style>
