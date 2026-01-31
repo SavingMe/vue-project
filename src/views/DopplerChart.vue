@@ -23,7 +23,11 @@
         
         <div class="quick-actions">
           <button @click="setRange(3)">近3天</button>
+          <button @click="setRange(7)">近7天</button>
+          <button @click="setRange(15)">近15天</button>
           <button @click="setRange(30)">近30天</button>
+          <button @click="setRange(60)">近60天</button>
+          <button @click="setRange(90)">近90天</button>
         </div>
       </div>
     </div>
