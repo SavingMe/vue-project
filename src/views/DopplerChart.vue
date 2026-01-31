@@ -19,7 +19,7 @@
         <div class="control-item">
           <label>监控周期:</label>
           <div class="btn-group">
-            <button v-for="days in [3, 7, 15, 30, 60, 90]" :key="days" :class="{ active: currentRangeDays === days }"
+            <button v-for="days in [1,3, 7, 15, 30, 60, 90]" :key="days" :class="{ active: currentRangeDays === days }"
               @click="setRange(days)">
               近{{ days }}天
             </button>
